@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+cookies.txt
+*.cookies
+
+# Runtime data
+sessions/
+outputs/
+logs/
+tmp/
+downloads/
+temp/
+
+# Build output
+web/
+dist/
+build/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Media and generated documents
+*.mp4
+*.m4v
+*.mov
+*.mkv
+*.webm
+*.mp3
+*.wav
+*.m4a
+*.srt
+*.vtt
+*.docx
+*.pdf
+
+# Playwright / browser artifacts
+playwright-report/
+test-results/

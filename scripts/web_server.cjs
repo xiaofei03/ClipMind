@@ -578,6 +578,7 @@ function normalizeOutputDir(value) {
 async function runSubtitleExport(job, context) {
   const providerEnv = jobSecrets.get(job.id)?.providerEnv || {};
   const wantsMarkmap = (job.input.outputs || []).includes("markmap");
+  assertSubtitleExportHasText(context);
   const exported = await runNodeScript("summarize_subtitles_tree.cjs", [context.sessionDir], {
     timeoutMs: Number(process.env.SUBTITLE_SUMMARY_TIMEOUT_MS || 120000),
     env: {
@@ -608,6 +609,17 @@ async function runSubtitleExport(job, context) {
       reason: "Subtitle-only export skips visual evidence checks."
     }
   };
+}
+
+function assertSubtitleExportHasText(context) {
+  const subtitleText = String(context?.subtitleText || "").trim();
+  const hasSubtitleFile = Array.isArray(context?.subtitles) && context.subtitles.some((file) => /\.(srt|vtt)$/i.test(String(file || "")));
+  const hasTranscript = Boolean(context?.transcript?.ok && String(context.transcript.text || "").trim());
+  if (hasSubtitleFile || subtitleText.length >= 80 || hasTranscript) return;
+  const source = context?.source || "unknown";
+  const textSource = context?.textSource || "none";
+  const whisperReason = context?.transcript?.reason ? ` Whisper: ${context.transcript.reason}` : "";
+  throw new Error(`No usable subtitle text was found. Source=${source}, textSource=${textSource}.${whisperReason}`);
 }
 
 function exportSubtitlesFromContext(context) {

@@ -869,12 +869,16 @@ async function tryPrepareVideoContextFromBilibiliApi(input, options) {
     return null;
   }
 
-  const infoText = [
+  const metadataText = [
     probe.title ? `Title: ${probe.title}` : "",
     probe.owner ? `Owner: ${probe.owner}` : "",
     probe.description ? `Description:\n${probe.description}` : ""
   ].filter(Boolean).join("\n\n");
-  await writeFile(join(options.subtitleDir, "bilibili_info.txt"), infoText, "utf8");
+  await writeFile(join(options.sessionDir, "bilibili_metadata.txt"), metadataText, "utf8");
+
+  const bilibiliSubtitles = await downloadBilibiliSubtitles(probe, options.subtitleDir);
+  const subtitleAnchors = await extractSubtitleAnchors(bilibiliSubtitles);
+  const subtitleText = await readSubtitlePreview(bilibiliSubtitles);
 
   const videoPath = await findLargestVideoFile(options.sessionDir);
   const frameResult = await extractFramesForContext(videoPath, options.frameDir, {
@@ -882,11 +886,12 @@ async function tryPrepareVideoContextFromBilibiliApi(input, options) {
     sessionDir: options.sessionDir,
     metadata: { duration: probe.duration },
     frameIntervalSeconds: options.frameIntervalSeconds,
-    maxFrames: options.maxFrames
+    maxFrames: options.maxFrames,
+    subtitleAnchors
   });
   const transcript = await maybeTranscribeVideo(videoPath, options.sessionDir, input, {
-    subtitleText: infoText,
-    subtitles: [join(options.subtitleDir, "bilibili_info.txt")]
+    subtitleText,
+    subtitles: bilibiliSubtitles
   });
   const context = {
     sessionDir: options.sessionDir,
@@ -900,18 +905,21 @@ async function tryPrepareVideoContextFromBilibiliApi(input, options) {
       webpage_url: probe.webpageUrl || normalizeVideoUrl(input.url, "url"),
       description: probe.description,
       upload_date: probe.pubdate,
-      subtitles: [],
+      subtitles: probe.subtitles || [],
       automatic_captions: []
     },
-    subtitles: [join(options.subtitleDir, "bilibili_info.txt")],
+    subtitles: bilibiliSubtitles,
     frames: frameResult.frames,
-    subtitleText: infoText.slice(0, 32000),
+    subtitleText,
+    metadataText: metadataText.slice(0, 32000),
     transcript,
     frameIntervalSeconds: options.frameIntervalSeconds,
     maxFrames: options.maxFrames,
     frameStrategy: frameResult.strategy,
     frameSampling: frameResult.sampling,
     frameManifest: frameResult.manifest,
+    subtitleAnchors,
+    textSource: bilibiliSubtitles.length ? "bilibili_platform_subtitles" : (transcript?.ok ? "whisper" : "metadata_only"),
     source: "bilibili_api_fallback",
     fallbackReason: options.fallbackReason,
     bilibiliApi: probe,
@@ -1860,6 +1868,7 @@ async function probeBilibiliApi(input) {
   }
 
   const cid = view.data.cid;
+  const subtitles = await fetchBilibiliSubtitleList({ bvid, cid, headers });
   const playUrl = new URL("https://api.bilibili.com/x/player/playurl");
   playUrl.searchParams.set("bvid", bvid);
   playUrl.searchParams.set("cid", String(cid));
@@ -1907,10 +1916,103 @@ async function probeBilibiliApi(input) {
     pubdate: view.data.pubdate,
     description: view.data.desc,
     coverUrl: view.data.pic,
+    subtitles,
     videoUrl: durl.url,
     size: durl.size,
     acceptDescription: play.data?.accept_description || []
   };
+}
+
+async function fetchBilibiliSubtitleList({ bvid, cid, headers }) {
+  const endpoints = [
+    `https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(String(cid))}`,
+    `https://api.bilibili.com/x/player/wbi/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(String(cid))}`
+  ];
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, { headers });
+      if (!response.ok) continue;
+      const data = JSON.parse(await response.text());
+      const subtitles = data?.data?.subtitle?.subtitles || [];
+      if (Array.isArray(subtitles) && subtitles.length) {
+        return subtitles
+          .filter((item) => item?.subtitle_url || item?.body_url)
+          .map((item) => ({
+            lan: item.lan || "",
+            lanDoc: item.lan_doc || item.lanDoc || "",
+            source: item.ai_status ? "auto" : "manual",
+            url: normalizeBilibiliSubtitleUrl(item.subtitle_url || item.body_url)
+          }));
+      }
+    } catch {
+      // Try the next endpoint.
+    }
+  }
+  return [];
+}
+
+async function downloadBilibiliSubtitles(probe, subtitleDir) {
+  const subtitleItems = Array.isArray(probe.subtitles) ? probe.subtitles : [];
+  const written = [];
+  for (const [index, item] of subtitleItems.entries()) {
+    if (!item?.url) continue;
+    try {
+      const response = await fetch(item.url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Referer": probe.webpageUrl || "https://www.bilibili.com/"
+        }
+      });
+      if (!response.ok) continue;
+      const data = JSON.parse(await response.text());
+      const srt = bilibiliSubtitleJsonToSrt(data);
+      if (!srt.trim()) continue;
+      const lang = safeName(item.lan || item.lanDoc || `subtitle-${index + 1}`).slice(0, 24) || `subtitle-${index + 1}`;
+      const filePath = join(subtitleDir, `bilibili-${lang}.srt`);
+      await writeFile(filePath, srt, "utf8");
+      written.push(filePath);
+    } catch {
+      // Ignore a single subtitle track failure and continue with other languages.
+    }
+  }
+  return written;
+}
+
+function normalizeBilibiliSubtitleUrl(url) {
+  const value = String(url || "").trim();
+  if (!value) return "";
+  if (value.startsWith("//")) return `https:${value}`;
+  if (value.startsWith("/")) return `https://www.bilibili.com${value}`;
+  return value;
+}
+
+function bilibiliSubtitleJsonToSrt(data) {
+  const body = Array.isArray(data?.body) ? data.body : [];
+  return body
+    .map((item, index) => {
+      const from = Number(item.from ?? item.start ?? 0);
+      const to = Number(item.to ?? item.end ?? from + 2);
+      const content = String(item.content || item.text || "")
+        .replace(/\r?\n/g, " ")
+        .trim();
+      if (!content) return "";
+      return [
+        String(index + 1),
+        `${formatSrtTime(from)} --> ${formatSrtTime(Math.max(to, from + 0.1))}`,
+        content
+      ].join("\n");
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function formatSrtTime(seconds) {
+  const safe = Math.max(0, Number(seconds) || 0);
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const s = Math.floor(safe % 60);
+  const ms = Math.floor((safe - Math.floor(safe)) * 1000);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")},${String(ms).padStart(3, "0")}`;
 }
 
 async function probeDouyinApi(input) {

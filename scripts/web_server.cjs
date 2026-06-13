@@ -12,6 +12,7 @@ const serverPath = path.join(projectDir, "src", "server.js");
 const port = Number(process.env.VIDEO_LEARNING_WEB_PORT || 8787);
 const jobs = new Map();
 const jobSecrets = new Map();
+const jobProcesses = new Map();
 const allowedFileRoots = new Set([path.resolve(projectDir, "sessions")]);
 const logDir = path.join(projectDir, "logs");
 const logPath = path.join(logDir, "web_server.log");
@@ -23,6 +24,9 @@ function runNodeScript(scriptName, args = [], options = {}) {
       env: { ...process.env, ...(options.env || {}) },
       windowsHide: true
     });
+    if (typeof options.onChild === "function") {
+      options.onChild(child);
+    }
     let stdout = "";
     let stderr = "";
     const timeout = options.timeoutMs
@@ -422,6 +426,64 @@ function addEvent(job, stage, message, extra = {}) {
   updateJob(job, { stage, events: job.events });
 }
 
+function isTerminalJob(job) {
+  return ["completed", "failed", "cancelled"].includes(job?.status);
+}
+
+function trackJobProcess(job, child) {
+  if (!job?.id || !child) return;
+  let processes = jobProcesses.get(job.id);
+  if (!processes) {
+    processes = new Set();
+    jobProcesses.set(job.id, processes);
+  }
+  processes.add(child);
+  child.once("close", () => {
+    const current = jobProcesses.get(job.id);
+    if (!current) return;
+    current.delete(child);
+    if (!current.size) jobProcesses.delete(job.id);
+  });
+}
+
+function stopJobProcesses(job) {
+  const processes = jobProcesses.get(job.id);
+  if (!processes) return;
+  for (const child of processes) {
+    try {
+      if (!child.killed) child.kill();
+    } catch {
+      // Process may already be gone.
+    }
+  }
+  jobProcesses.delete(job.id);
+}
+
+function cancelJob(job) {
+  if (!job) return null;
+  if (isTerminalJob(job)) return job;
+  stopJobProcesses(job);
+  updateJob(job, {
+    status: "cancelled",
+    stage: "Cancelled",
+    error: null,
+    progress: {
+      ...(job.progress || {}),
+      phase: "cancelled",
+      cancelled: true
+    }
+  });
+  addEvent(job, "Cancelled", "用户已暂停分析，后台进程已终止");
+  jobSecrets.delete(job.id);
+  return job;
+}
+
+function throwIfCancelled(job) {
+  if (job?.status === "cancelled") {
+    throw new Error("Job was cancelled by user.");
+  }
+}
+
 async function runJob(job) {
   let stopPrepareMonitor = null;
   try {
@@ -430,7 +492,10 @@ async function runJob(job) {
     const subtitleOnly = isSubtitleOnlyJob(job);
     updateJob(job, { status: "running", stage: "Detecting platform" });
     addEvent(job, "Detecting platform", "识别视频平台和解析路线");
-    const platform = await mcpCall("detect_video_platform", { url });
+    const platform = await mcpCall("detect_video_platform", { url }, {
+      onChild: (child) => trackJobProcess(job, child)
+    });
+    throwIfCancelled(job);
     updateJob(job, { platform });
     addEvent(job, "Preparing video", `平台：${platform.platform}，路线：${(platform.strategyOrder || []).join(" -> ")}`);
 
@@ -476,7 +541,11 @@ async function runJob(job) {
     let result;
     if (mode === "quick" && !subtitleOnly) {
       addEvent(job, "Quick summary", "快速总结模式：准备视频并调用模型");
-      result = await mcpCall("summarize_video_link", args, { env: providerEnv });
+      result = await mcpCall("summarize_video_link", args, {
+        env: providerEnv,
+        onChild: (child) => trackJobProcess(job, child)
+      });
+      throwIfCancelled(job);
     } else {
       const jobWorkDir = path.join(job.input.outputDir || defaultOutputDir(), "web-jobs", job.id);
       fs.mkdirSync(jobWorkDir, { recursive: true });
@@ -490,9 +559,11 @@ async function runJob(job) {
         env: providerEnv,
         onChild: (child) => {
           prepareChild = child;
+          trackJobProcess(job, child);
         }
       });
       const context = await waitForPreparedContext(jobWorkDir, preparePromise);
+      throwIfCancelled(job);
       if (prepareChild && !prepareChild.killed) {
         prepareChild.kill();
       }
@@ -525,10 +596,14 @@ async function runJob(job) {
       } else {
         result = await runLearningExtraction(job, context);
       }
+      throwIfCancelled(job);
     }
     updateJob(job, { status: "completed", stage: "Completed", result });
     addEvent(job, "Completed", "分析完成");
   } catch (error) {
+    if (job.status === "cancelled") {
+      return;
+    }
     logLine("error", "job failed", {
       jobId: job.id,
       stage: job.stage,
@@ -540,7 +615,8 @@ async function runJob(job) {
     if (stopPrepareMonitor) {
       stopPrepareMonitor();
     }
-    if (job.status === "completed" || job.status === "failed") {
+    if (isTerminalJob(job)) {
+      jobProcesses.delete(job.id);
       jobSecrets.delete(job.id);
     }
   }
@@ -581,6 +657,7 @@ async function runSubtitleExport(job, context) {
   assertSubtitleExportHasText(context);
   const exported = await runNodeScript("summarize_subtitles_tree.cjs", [context.sessionDir], {
     timeoutMs: Number(process.env.SUBTITLE_SUMMARY_TIMEOUT_MS || 120000),
+    onChild: (child) => trackJobProcess(job, child),
     env: {
       ...providerEnv,
       LEARNING_OUTPUTS: (job.input.outputs || []).join(","),
@@ -722,6 +799,7 @@ function runLearningExtraction(job, context) {
       },
       windowsHide: true
     });
+    trackJobProcess(job, child);
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
@@ -1170,6 +1248,16 @@ async function handleApi(req, res) {
       smartDenseFps: body.smartDenseFps
     });
     sendJson(res, 202, job);
+    return;
+  }
+  const cancelJobMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/cancel$/);
+  if (req.method === "POST" && cancelJobMatch) {
+    const job = jobs.get(cancelJobMatch[1]);
+    if (!job) {
+      sendJson(res, 404, { error: "job not found" });
+      return;
+    }
+    sendJson(res, 200, cancelJob(job));
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/refine") {

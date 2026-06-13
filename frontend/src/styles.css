@@ -1954,6 +1954,11 @@ button:disabled:active {
   background: transparent;
 }
 
+.primary-action.cancel-action {
+  --button-fill: linear-gradient(135deg, rgba(255, 239, 244, 0.98), rgba(255, 126, 166, 0.9));
+  color: #180811;
+}
+
 .secondary-action,
 .collect-result-button,
 .refine-card button {

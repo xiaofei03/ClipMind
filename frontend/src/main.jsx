@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArrowLeft,
@@ -19,6 +19,7 @@ import {
   Search,
   Settings2,
   Sparkles,
+  Square,
   StickyNote,
   Trash2,
   Wand2,
@@ -31,10 +32,10 @@ import "./styles.css";
 
 const initialInput = {
   mode: "learning",
-  generateHtml: true,
-  generateWord: true,
-  generateMarkmap: true,
-  generateSubtitles: true
+  generateHtml: false,
+  generateWord: false,
+  generateMarkmap: false,
+  generateSubtitles: false
 };
 
 const HISTORY_KEY = "video-learning-desk-history";
@@ -611,6 +612,7 @@ function Workspace({ health, initialUrl, onBack, onCollect }) {
   const [history, setHistory] = useState(() => loadHistory());
   const [selectedHistory, setSelectedHistory] = useState(null);
   const [refining, setRefining] = useState(false);
+  const pendingCancelRef = useRef(false);
 
   useEffect(() => {
     setUrl(initialUrl || "");
@@ -624,7 +626,7 @@ function Workspace({ health, initialUrl, onBack, onCollect }) {
       if (settings.generateMarkmap) textOnlyOutputs.push("markmap");
       return textOnlyOutputs;
     }
-    const items = ["markdown"];
+    const items = [];
     if (settings.generateHtml) items.push("article_html");
     if (settings.generateWord) items.push("word_docx");
     if (settings.generateMarkmap) items.push("markmap");
@@ -657,14 +659,14 @@ function Workspace({ health, initialUrl, onBack, onCollect }) {
   }, [history]);
 
   useEffect(() => {
-    if (!job?.id || job.status === "completed" || job.status === "failed") return undefined;
+    if (!job?.id || ["completed", "failed", "cancelled"].includes(job.status)) return undefined;
     const timer = setInterval(async () => {
       try {
         const response = await fetch(`/api/jobs/${job.id}`);
         const data = await readJsonResponse(response);
         if (!response.ok) throw new Error(data.error || "任务状态读取失败");
         setJob(data);
-        if (data.status === "completed" || data.status === "failed") {
+        if (["completed", "failed", "cancelled"].includes(data.status)) {
           setBusy(false);
           clearInterval(timer);
         }
@@ -752,6 +754,7 @@ function Workspace({ health, initialUrl, onBack, onCollect }) {
       setMessage("请选择至少一种输出格式。");
       return;
     }
+    pendingCancelRef.current = false;
     setBusy(true);
     rememberCurrentUrl();
     onCollect({ url, status: "queued" });
@@ -770,11 +773,46 @@ function Workspace({ health, initialUrl, onBack, onCollect }) {
         outputDir,
         articleTemplateMode: "cover_markmap_article"
       });
+      if (pendingCancelRef.current) {
+        pendingCancelRef.current = false;
+        setJob(data);
+        const cancelled = await postJson(`/api/jobs/${data.id}/cancel`, {});
+        setJob(cancelled);
+        setBusy(false);
+        setMessage("分析已暂停，后台进程已终止。");
+        return;
+      }
       setJob(data);
     } catch (error) {
       setBusy(false);
       setMessage(error.message);
     }
+  }
+
+  async function cancelAnalyze() {
+    if (!busy) return;
+    if (!job?.id) {
+      pendingCancelRef.current = true;
+      setMessage("正在等待任务创建完成后暂停...");
+      return;
+    }
+    setMessage("正在暂停分析并终止后台进程...");
+    try {
+      const data = await postJson(`/api/jobs/${job.id}/cancel`, {});
+      setJob(data);
+      setBusy(false);
+      setMessage("分析已暂停，后台进程已终止。");
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  function handleAnalyzeButton() {
+    if (busy) {
+      cancelAnalyze();
+      return;
+    }
+    startAnalyze();
   }
 
   async function runRefinement(target) {
@@ -889,9 +927,9 @@ function Workspace({ health, initialUrl, onBack, onCollect }) {
         </div>
 
         <div className="sidebar-actions single">
-          <button className="primary-action" type="button" onClick={startAnalyze} disabled={busy || refining}>
-            {busy ? <Loader2 className="spin" size={18} /> : <Play size={18} />}
-            开始分析
+          <button className={`primary-action ${busy ? "cancel-action" : ""}`} type="button" onClick={handleAnalyzeButton} disabled={refining}>
+            {busy ? <Square size={18} /> : <Play size={18} />}
+            {busy ? "暂停分析" : "开始分析"}
           </button>
         </div>
       </aside>

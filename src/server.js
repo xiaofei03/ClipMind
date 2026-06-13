@@ -1680,6 +1680,8 @@ async function maybeTranscribeVideo(videoPath, sessionDir, input, textTrack = {}
 
   const whisperResult = await runCommand(WHISPER_BIN, [
     audioPath,
+    "--model",
+    input.whisperModel || process.env.WHISPER_MODEL || "base",
     "--language",
     input.whisperLanguage || "zh",
     "--output_format",

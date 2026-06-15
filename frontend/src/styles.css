@@ -1229,6 +1229,35 @@ a {
   background: rgba(255, 255, 255, 0.04);
 }
 
+.platform-auth-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid rgba(121, 230, 255, 0.2);
+  border-radius: 16px;
+  background:
+    linear-gradient(135deg, rgba(121, 230, 255, 0.09), rgba(185, 255, 115, 0.055)),
+    rgba(255, 255, 255, 0.04);
+}
+
+.platform-auth-panel.ready {
+  border-color: rgba(185, 255, 115, 0.34);
+  background:
+    linear-gradient(135deg, rgba(185, 255, 115, 0.12), rgba(121, 230, 255, 0.055)),
+    rgba(255, 255, 255, 0.04);
+}
+
+.platform-auth-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.platform-auth-actions.single {
+  grid-template-columns: 1fr;
+}
+
 .model-config-copy {
   min-width: 0;
   display: grid;
@@ -1351,6 +1380,13 @@ button:disabled:active {
   grid-template-rows: auto auto minmax(0, 1fr);
   gap: 18px;
   min-width: 0;
+}
+
+.recovery-auth-panel {
+  border-color: rgba(255, 185, 115, 0.3);
+  background:
+    linear-gradient(135deg, rgba(255, 185, 115, 0.1), rgba(121, 230, 255, 0.055)),
+    rgba(255, 255, 255, 0.04);
 }
 
 .desk-topbar {

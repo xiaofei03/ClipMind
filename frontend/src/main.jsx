@@ -612,6 +612,8 @@ function Workspace({ health, initialUrl, onBack, onCollect }) {
   const [history, setHistory] = useState(() => loadHistory());
   const [selectedHistory, setSelectedHistory] = useState(null);
   const [refining, setRefining] = useState(false);
+  const [biliAuth, setBiliAuth] = useState(null);
+  const [biliAuthBusy, setBiliAuthBusy] = useState(false);
   const pendingCancelRef = useRef(false);
 
   useEffect(() => {
@@ -653,6 +655,7 @@ function Workspace({ health, initialUrl, onBack, onCollect }) {
   }, [outputDir]);
 
   const platformLabelValue = useMemo(() => strategy?.platform || inferPlatform(url), [strategy?.platform, url]);
+  const isBilibiliInput = platformLabelValue === "bilibili";
 
   useEffect(() => {
     saveHistory(history);
@@ -742,6 +745,35 @@ function Workspace({ health, initialUrl, onBack, onCollect }) {
       setMessage(error.message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function openBilibiliLogin() {
+    setBiliAuthBusy(true);
+    setMessage("正在打开 B 站登录窗口，请在弹出的浏览器中完成登录。");
+    try {
+      const data = await postJson("/api/auth/bilibili/open", { url });
+      setBiliAuth(data);
+      setMessage("B 站登录窗口已打开。登录完成后点击“检测登录态”。");
+    } catch (error) {
+      setMessage(error.message);
+    } finally {
+      setBiliAuthBusy(false);
+    }
+  }
+
+  async function checkBilibiliAuth() {
+    setBiliAuthBusy(true);
+    setMessage("正在检测 B 站登录态和 cookies 可用性。");
+    try {
+      const data = await postJson("/api/auth/bilibili/status", { url });
+      setBiliAuth(data);
+      setMessage(data.ok ? "B 站登录态可用，后续会自动使用本地 cookies。" : data.message || "B 站登录态暂不可用。");
+    } catch (error) {
+      setBiliAuth({ ok: false, message: error.message });
+      setMessage(error.message);
+    } finally {
+      setBiliAuthBusy(false);
     }
   }
 
@@ -962,8 +994,18 @@ function Workspace({ health, initialUrl, onBack, onCollect }) {
           </section>
 
           <section className="output-panel">
-            <PanelTitle title="输出文件" desc="完成后优先打开图文 HTML，再看 Markdown 和思维导图。" />
-            <ResultOutput job={job} refining={refining} onRefine={() => runRefinement(job)} onCollect={() => onCollect({ url, status: "saved", result: job?.result || null, refinement: job?.result?.refinement || null })} />
+            <PanelTitle title="输出文件" desc="完成后优先打开图文 HTML 或 Word，再看思维导图与字幕。" />
+            <ResultOutput
+              job={job}
+              platform={platformLabelValue}
+              auth={biliAuth}
+              authBusy={biliAuthBusy}
+              onOpenBilibiliLogin={openBilibiliLogin}
+              onCheckBilibiliAuth={checkBilibiliAuth}
+              refining={refining}
+              onRefine={() => runRefinement(job)}
+              onCollect={() => onCollect({ url, status: "saved", result: job?.result || null, refinement: job?.result?.refinement || null })}
+            />
           </section>
 
           <section className="history-panel">
@@ -1047,6 +1089,85 @@ function StatusCard({ icon, title, value }) {
   );
 }
 
+function BilibiliAuthPanel({ auth, busy, onOpen, onCheck }) {
+  return (
+    <div className={`platform-auth-panel ${auth?.ok ? "ready" : ""}`}>
+      <div className="model-config-copy">
+        <span className="model-config-icon">
+          <KeyRound size={17} />
+        </span>
+        <div>
+          <strong>B 站登录助手</strong>
+          <small>{auth?.ok ? "登录态可用" : auth?.message || "用于解决 412、登录态和音频拦截"}</small>
+        </div>
+      </div>
+      <div className={`platform-auth-actions ${config.secondary ? "" : "single"}`}>
+        <button className="secondary-action compact-action" type="button" onClick={onOpen} disabled={busy}>
+          {busy ? <Loader2 className="spin" size={16} /> : <ExternalLink size={16} />}
+          打开登录
+        </button>
+        <button className="secondary-action compact-action" type="button" onClick={onCheck} disabled={busy}>
+          <Radar size={16} />
+          检测登录态
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PlatformLoginRecovery({ platform, auth, busy, onOpenBilibiliLogin, onCheckBilibiliAuth }) {
+  const normalized = String(platform || "").toLowerCase();
+  const loginTargets = {
+    bilibili: {
+      title: "B 站登录助手",
+      detail: auth?.ok ? "登录态可用，可以重新分析。" : auth?.message || "当前失败可能与 cookies、登录态或 412 拦截有关。",
+      primary: "打开登录",
+      secondary: "检测登录态",
+      onPrimary: onOpenBilibiliLogin,
+      onSecondary: onCheckBilibiliAuth
+    },
+    douyin: {
+      title: "抖音登录助手",
+      detail: "当前失败可能与登录态、反爬或链接权限有关。请先在浏览器完成登录，再重新分析。",
+      primary: "打开抖音",
+      onPrimary: () => window.open("https://www.douyin.com/", "_blank", "noreferrer")
+    },
+    youtube: {
+      title: "YouTube 登录助手",
+      detail: "当前失败可能与字幕权限、地区限制或 cookies 有关。请先在浏览器完成登录，再重新分析。",
+      primary: "打开 YouTube",
+      onPrimary: () => window.open("https://www.youtube.com/", "_blank", "noreferrer")
+    }
+  };
+  const config = loginTargets[normalized];
+  if (!config) return null;
+  return (
+    <div className={`platform-auth-panel recovery-auth-panel ${auth?.ok ? "ready" : ""}`}>
+      <div className="model-config-copy">
+        <span className="model-config-icon">
+          <KeyRound size={17} />
+        </span>
+        <div>
+          <strong>{config.title}</strong>
+          <small>{config.detail}</small>
+        </div>
+      </div>
+      <div className="platform-auth-actions">
+        <button className="secondary-action compact-action" type="button" onClick={config.onPrimary} disabled={busy}>
+          {busy ? <Loader2 className="spin" size={16} /> : <ExternalLink size={16} />}
+          {config.primary}
+        </button>
+        {config.secondary && (
+          <button className="secondary-action compact-action" type="button" onClick={config.onSecondary} disabled={busy}>
+            <Radar size={16} />
+            {config.secondary}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PanelTitle({ title, desc }) {
   return (
     <div className="panel-title">
@@ -1074,8 +1195,18 @@ function Timeline({ job, message }) {
   );
 }
 
-function ResultOutput({ job, refining, onRefine, onCollect }) {
-  if (!job) return <div className="empty-state">提交任务后，这里会显示 Markdown、图文 HTML 和思维导图文件。</div>;
+function ResultOutput({
+  job,
+  platform,
+  auth,
+  authBusy,
+  onOpenBilibiliLogin,
+  onCheckBilibiliAuth,
+  refining,
+  onRefine,
+  onCollect
+}) {
+  if (!job) return <div className="empty-state">提交任务后，这里会显示图文 HTML、Word、思维导图和字幕文件。</div>;
   if (job.status === "failed") {
     return (
       <div className="result-stack">
@@ -1083,6 +1214,15 @@ function ResultOutput({ job, refining, onRefine, onCollect }) {
           <strong>分析失败</strong>
           <p>{job.error || "未知错误"}</p>
         </div>
+        {shouldShowLoginRecovery(job.error) && (
+          <PlatformLoginRecovery
+            platform={platform}
+            auth={auth}
+            busy={authBusy}
+            onOpenBilibiliLogin={onOpenBilibiliLogin}
+            onCheckBilibiliAuth={onCheckBilibiliAuth}
+          />
+        )}
         <button className="secondary-action" type="button" onClick={onCollect}>
           <BookmarkPlus size={16} />
           加入收藏盒
@@ -1202,14 +1342,17 @@ function collectResultFiles(result) {
   if (!result) return [];
   const files = [];
   if (result.subtitleSummaryPath) files.push({ label: "字幕逻辑树总结", hint: "不抽帧的快速内容总结", path: result.subtitleSummaryPath, icon: GitBranch, primary: !result.articlePath });
-  if (result.subtitlesPath) files.push({ label: "字幕 Markdown", hint: "字幕全文和逻辑树总结", path: result.subtitlesPath, icon: StickyNote, primary: !result.articlePath && !result.subtitleSummaryPath });
   if (result.subtitlesTextPath) files.push({ label: "字幕 TXT", hint: "纯文本字幕，便于复制", path: result.subtitlesTextPath, icon: FileText });
   if (result.articlePath) files.push({ label: "图文 HTML", hint: "推荐先看，图文排版版", path: result.articlePath, icon: FileText, primary: true });
-  if (result.wordPath) files.push({ label: "Word 讲义", hint: "可编辑 DOCX，适合继续改写", path: result.wordPath, icon: FileText });
-  if (result.markdownPath) files.push({ label: "Markdown 笔记", hint: "可编辑的原始笔记", path: result.markdownPath, icon: StickyNote });
+  if (result.wordPath) files.push({ label: "Word 笔记", hint: "可编辑 DOCX，适合继续改写", path: result.wordPath, icon: FileText });
   if (result.markmapPath) files.push({ label: "思维导图 HTML", hint: "精简结构版总结", path: result.markmapPath, icon: GitBranch });
   if (result.context?.sessionDir) files.push({ label: "Session 目录", hint: "证据帧和中间文件", path: result.context.sessionDir, icon: FolderOpen });
   return files;
+}
+
+function shouldShowLoginRecovery(error) {
+  const text = String(error || "").toLowerCase();
+  return /cookie|cookies|login|登录|412|403|forbidden|precondition|anti-bot|captcha|verify|验证|权限|unauthorized/.test(text);
 }
 
 async function postJson(url, payload) {

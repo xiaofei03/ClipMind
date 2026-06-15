@@ -145,6 +145,31 @@ function renderMarkmap(markdownPath, htmlPath) {
   }
 }
 
+function resolvePythonBin() {
+  const bundled = path.join(process.env.USERPROFILE || "", ".cache", "codex-runtimes", "codex-primary-runtime", "dependencies", "python", "python.exe");
+  if (process.env.PYTHON_BIN) return process.env.PYTHON_BIN;
+  if (bundled && fs.existsSync(bundled)) return bundled;
+  return "python";
+}
+
+function renderSubtitleDocx(sessionDir) {
+  const scriptPath = path.join(__dirname, "render_subtitle_docx.py");
+  const result = spawnSync(resolvePythonBin(), [scriptPath, sessionDir], {
+    cwd: path.resolve(__dirname, ".."),
+    encoding: "utf8",
+    windowsHide: true
+  });
+  if (result.status !== 0) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(result.stdout || "{}");
+    return payload.outPath || path.join(sessionDir, "subtitle_tree_summary.docx");
+  } catch {
+    return path.join(sessionDir, "subtitle_tree_summary.docx");
+  }
+}
+
 (async () => {
   const context = readJson(path.join(sessionDir, "context.json"), {});
   const title = context.metadata?.title || context.metadata?.fulltitle || "字幕逻辑树总结";
@@ -198,11 +223,15 @@ function renderMarkmap(markdownPath, htmlPath) {
     fs.writeFileSync(markmapMarkdownPath, summary, "utf8");
     renderMarkmap(markmapMarkdownPath, markmapHtmlPath);
   }
+  const wordPath = /(^|,)word_docx(,|$)/.test(process.env.LEARNING_OUTPUTS || "")
+    ? renderSubtitleDocx(sessionDir)
+    : null;
 
   process.stdout.write(JSON.stringify({
     summaryPath,
     subtitlesMarkdownPath,
     subtitlesTextPath,
+    wordPath,
     markmapMarkdownPath,
     markmapHtmlPath,
     preview: summary.slice(0, 4000)

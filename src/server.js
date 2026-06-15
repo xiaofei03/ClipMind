@@ -186,6 +186,11 @@ const TOOLS = [
           description: "Prepare only metadata, text tracks, and transcript. Skip frame extraction for subtitle-only exports.",
           default: false
         },
+        textOnly: {
+          type: "boolean",
+          description: "Prepare a subtitle/transcript-only context. Do not download the full video; download audio only if Whisper fallback is required.",
+          default: false
+        },
         frameStrategy: {
           type: "string",
           enum: ["fixed", "smart"],
@@ -415,10 +420,27 @@ function runCommand(command, args, options = {}) {
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString("utf8");
     });
+    const timeout = options.timeoutMs
+      ? setTimeout(() => {
+          try {
+            child.kill();
+          } catch {
+            // Process may already have exited.
+          }
+          resolvePromise({
+            ok: false,
+            code: -1,
+            stdout,
+            stderr: `${stderr}\n${command} timed out after ${options.timeoutMs}ms`.trim()
+          });
+        }, options.timeoutMs)
+      : null;
     child.on("error", (error) => {
+      if (timeout) clearTimeout(timeout);
       resolvePromise({ ok: false, code: -1, stdout, stderr: error.message });
     });
     child.on("close", (code) => {
+      if (timeout) clearTimeout(timeout);
       resolvePromise({ ok: code === 0, code, stdout, stderr });
     });
   });
@@ -558,6 +580,16 @@ async function prepareVideoContext(input) {
 
   await mkdir(subtitleDir, { recursive: true });
   await mkdir(frameDir, { recursive: true });
+
+  if (input.textOnly) {
+    return prepareTextOnlyContext(input, {
+      url,
+      platform,
+      sessionDir,
+      subtitleDir,
+      frameDir
+    });
+  }
 
   const ytDlpAccessArgs = buildYtDlpAccessArgs({ ...input, url });
   const metadataResult = await runCommand(YT_DLP_BIN, [
@@ -745,6 +777,170 @@ async function prepareVideoContext(input) {
 
   await writeFile(join(sessionDir, "context.json"), JSON.stringify(context, null, 2), "utf8");
   return context;
+}
+
+async function prepareTextOnlyContext(input, options) {
+  const { url, platform, sessionDir, subtitleDir, frameDir } = options;
+  const ytDlpAccessArgs = buildYtDlpAccessArgs({ ...input, url });
+  const textOnlyPolicy = getTextOnlyPlatformPolicy(url, input);
+  let metadata = {};
+  let subtitles = [];
+  let subtitleText = "";
+  let metadataText = "";
+  let source = "text_track_only";
+  let textSource = "none";
+  let bilibiliApi = null;
+
+  if (isBilibiliUrl(url)) {
+    const probe = await probeBilibiliApi(input).catch((error) => ({
+      ok: false,
+      error: error.message || String(error)
+    }));
+    bilibiliApi = probe;
+    await writeFile(join(sessionDir, "bilibili_api_probe.json"), JSON.stringify(probe, null, 2), "utf8");
+    if (probe.ok) {
+      metadata = {
+        title: probe.title,
+        uploader: probe.owner,
+        duration: probe.duration,
+        thumbnail: probe.coverUrl,
+        webpage_url: probe.webpageUrl || url,
+        description: probe.description,
+        upload_date: probe.pubdate,
+        subtitles: probe.subtitles || [],
+        automatic_captions: []
+      };
+      metadataText = [
+        probe.title ? `Title: ${probe.title}` : "",
+        probe.owner ? `Owner: ${probe.owner}` : "",
+        probe.description ? `Description:\n${probe.description}` : ""
+      ].filter(Boolean).join("\n\n");
+      await writeFile(join(sessionDir, "bilibili_metadata.txt"), metadataText, "utf8");
+      subtitles = await downloadBilibiliSubtitles(probe, subtitleDir);
+      subtitleText = await readSubtitlePreview(subtitles);
+      if (subtitles.length || meaningfulTextLength(subtitleText) >= 80) {
+        source = "bilibili_text_track";
+        textSource = "bilibili_platform_subtitles";
+      }
+    }
+  }
+
+  if (!subtitles.length && !textOnlyPolicy.skipYtDlpTextProbe) {
+    const metadataResult = await runCommand(YT_DLP_BIN, [
+      ...ytDlpAccessArgs,
+      "--dump-single-json",
+      "--no-playlist",
+      url
+    ], {
+      timeoutMs: textOnlyPolicy.metadataTimeoutMs
+    });
+    if (metadataResult.ok) {
+      metadata = pickMetadata(parseMetadata(metadataResult));
+      await writeFile(join(sessionDir, "metadata.json"), JSON.stringify(parseMetadata(metadataResult), null, 2), "utf8");
+    } else {
+      await writeFile(join(sessionDir, "metadata_error.txt"), metadataResult.stderr || metadataResult.stdout || "", "utf8");
+    }
+
+    await runCommand(YT_DLP_BIN, [
+      ...ytDlpAccessArgs,
+      "--skip-download",
+      "--write-subs",
+      "--write-auto-subs",
+      "--sub-langs",
+      "zh.*,en.*,ja.*,ko.*",
+      "--sub-format",
+      "vtt/srt/best",
+      "-o",
+      join(subtitleDir, "%(title).80s.%(ext)s"),
+      url
+    ], {
+      timeoutMs: textOnlyPolicy.subtitleTimeoutMs
+    });
+    subtitles = await listFiles(subtitleDir, [".vtt", ".srt"]);
+    subtitleText = await readSubtitlePreview(subtitles);
+    if (subtitles.length || meaningfulTextLength(subtitleText) >= 80) {
+      source = "yt-dlp_text_track";
+      textSource = subtitles.length ? "yt-dlp_platform_subtitles" : "yt-dlp_text";
+    }
+  }
+
+  const duration = Number(metadata.duration || bilibiliApi?.duration || 0);
+  const transcriptInput = textOnlyPolicy.disableWhisperFallback
+    ? { ...input, duration, textOnly: true, enableWhisper: "false", forceTextTrack: false }
+    : { ...input, duration, textOnly: true };
+  const transcript = await maybeTranscribeAudioUrl(url, sessionDir, transcriptInput, {
+    subtitleText,
+    subtitles,
+    duration
+  });
+  if (transcript?.ok) {
+    source = "audio_whisper_text_track";
+    textSource = "whisper";
+  }
+
+  const context = {
+    sessionDir,
+    url,
+    videoPath: null,
+    metadata,
+    subtitles,
+    frames: [],
+    subtitleText,
+    metadataText: metadataText.slice(0, 32000),
+    transcript,
+    frameIntervalSeconds: 0,
+    maxFrames: 0,
+    frameStrategy: "text_only",
+    frameSampling: {
+      strategy: "text_only",
+      maxFrames: 0,
+      reason: "textOnly was requested; full video download and frame extraction were skipped."
+    },
+    frameManifest: {
+      frames: [],
+      strategy: "text_only"
+    },
+    subtitleAnchors: await extractSubtitleAnchors(subtitles),
+    textSource,
+    source,
+    bilibiliApi,
+    platform
+  };
+  await writeFile(join(sessionDir, "context.json"), JSON.stringify(context, null, 2), "utf8");
+  return context;
+}
+
+function getTextOnlyPlatformPolicy(url, input = {}) {
+  const lower = String(url || "").toLowerCase();
+  const platform = isBilibiliUrl(url)
+    ? "bilibili"
+    : (/youtube\.com|youtu\.be/i.test(lower) ? "youtube" : "generic");
+  const envNumber = (key, fallback) => Number(process.env[key] || fallback);
+  if (platform === "bilibili") {
+    return {
+      platform,
+      skipYtDlpTextProbe: process.env.BILIBILI_TEXT_ONLY_SKIP_YTDLP_PROBE !== "0",
+      disableWhisperFallback: false,
+      metadataTimeoutMs: envNumber("BILIBILI_TEXT_ONLY_METADATA_TIMEOUT_MS", 10000),
+      subtitleTimeoutMs: envNumber("BILIBILI_TEXT_ONLY_SUBTITLE_TIMEOUT_MS", 10000)
+    };
+  }
+  if (platform === "youtube") {
+    return {
+      platform,
+      skipYtDlpTextProbe: false,
+      disableWhisperFallback: process.env.YOUTUBE_TEXT_ONLY_ENABLE_WHISPER_FALLBACK !== "1",
+      metadataTimeoutMs: envNumber("YOUTUBE_TEXT_ONLY_METADATA_TIMEOUT_MS", 30000),
+      subtitleTimeoutMs: envNumber("YOUTUBE_TEXT_ONLY_SUBTITLE_TIMEOUT_MS", 60000)
+    };
+  }
+  return {
+    platform,
+    skipYtDlpTextProbe: false,
+    disableWhisperFallback: false,
+    metadataTimeoutMs: envNumber("TEXT_ONLY_METADATA_TIMEOUT_MS", 45000),
+    subtitleTimeoutMs: envNumber("TEXT_ONLY_SUBTITLE_TIMEOUT_MS", 60000)
+  };
 }
 
 function detectVideoPlatform(input) {
@@ -1621,41 +1817,8 @@ function parseJsonFromText(text) {
 }
 
 async function maybeTranscribeVideo(videoPath, sessionDir, input, textTrack = {}) {
-  const policy = String(input.enableWhisper ?? "auto").toLowerCase();
-  const forceTextTrack = input.forceTextTrack !== false || policy === "auto";
-  const textLength = meaningfulTextLength(textTrack.subtitleText || textTrack.pageText || "");
-  const hasRealSubtitleFiles = Array.isArray(textTrack.subtitles) && textTrack.subtitles.some((file) => /\.(vtt|srt)$/i.test(String(file || "")));
-  const hasStrongTextTrack = hasRealSubtitleFiles || textLength >= 600;
-
-  if (policy !== "true" && hasStrongTextTrack) {
-    return {
-      ok: false,
-      skipped: true,
-      source: hasRealSubtitleFiles ? "platform_subtitles" : "page_or_description_text",
-      textLength,
-      reason: "Text track is already available; Whisper was skipped."
-    };
-  }
-
-  if (policy !== "true" && !forceTextTrack) {
-    return {
-      ok: false,
-      skipped: true,
-      textLength,
-      reason: "Whisper policy is disabled."
-    };
-  }
-
-  if (!WHISPER_BIN) {
-    return {
-      ok: false,
-      skipped: true,
-      textLength,
-      reason: forceTextTrack
-        ? "Text track is required, but no strong text track was found and WHISPER_BIN is not set."
-        : "WHISPER_BIN is not set. Install/configure Whisper or faster-whisper first."
-    };
-  }
+  const decision = getWhisperDecision(input, textTrack);
+  if (decision.skip) return decision.result;
 
   const audioPath = join(sessionDir, "audio.wav");
   const audioResult = await runCommand("ffmpeg", [
@@ -1669,7 +1832,9 @@ async function maybeTranscribeVideo(videoPath, sessionDir, input, textTrack = {}
     "-ar",
     "16000",
     audioPath
-  ]);
+  ], {
+    timeoutMs: getAudioExtractionTimeoutMs(input, textTrack)
+  });
   if (!audioResult.ok) {
     return {
       ok: false,
@@ -1678,17 +1843,122 @@ async function maybeTranscribeVideo(videoPath, sessionDir, input, textTrack = {}
     };
   }
 
+  return transcribeAudioFile(audioPath, sessionDir, input, textTrack);
+}
+
+async function maybeTranscribeAudioUrl(url, sessionDir, input, textTrack = {}) {
+  const decision = getWhisperDecision(input, textTrack);
+  if (decision.skip) return decision.result;
+
+  const audioPath = join(sessionDir, "audio.%(ext)s");
+  const runAudioDownload = (downloadInput) => runCommand(YT_DLP_BIN, [
+      ...buildYtDlpAccessArgs({ ...downloadInput, url }),
+      "--no-playlist",
+      "-f",
+      "ba/bestaudio/best",
+      "-x",
+      "--audio-format",
+      "wav",
+      "--audio-quality",
+      "5",
+      "-o",
+      audioPath,
+      url
+    ], {
+      timeoutMs: getAudioDownloadTimeoutMs(input, textTrack)
+    });
+  let audioResult = await runAudioDownload(input);
+  if (!audioResult.ok && /cookie database|cookies-from-browser/i.test(String(audioResult.stderr || audioResult.stdout || ""))) {
+    await writeFile(join(sessionDir, "audio_download_cookie_retry.txt"), audioResult.stderr || audioResult.stdout || "", "utf8");
+    audioResult = await runAudioDownload({
+      ...input,
+      cookiesFile: "",
+      cookiesFromBrowser: "",
+      disableAutoBrowserCookies: true
+    });
+  }
+  if (!audioResult.ok) {
+    return {
+      ok: false,
+      skipped: false,
+      reason: `Audio-only download failed: ${trimForError(audioResult.stderr || audioResult.stdout)}`
+    };
+  }
+
+  const downloadedAudio = await findAudioFile(sessionDir);
+  if (!downloadedAudio) {
+    return {
+      ok: false,
+      skipped: false,
+      reason: "Audio-only download finished, but no audio file was found."
+    };
+  }
+  return transcribeAudioFile(downloadedAudio, sessionDir, input, textTrack);
+}
+
+function getWhisperDecision(input, textTrack = {}) {
+  const policy = String(input.enableWhisper ?? "auto").toLowerCase();
+  const forceTextTrack = input.forceTextTrack !== false || policy === "auto";
+  const textLength = meaningfulTextLength(textTrack.subtitleText || textTrack.pageText || "");
+  const hasRealSubtitleFiles = Array.isArray(textTrack.subtitles) && textTrack.subtitles.some((file) => /\.(vtt|srt)$/i.test(String(file || "")));
+  const hasStrongTextTrack = hasRealSubtitleFiles || textLength >= 600;
+
+  if (policy !== "true" && hasStrongTextTrack) {
+    return {
+      skip: true,
+      result: {
+        ok: false,
+        skipped: true,
+        source: hasRealSubtitleFiles ? "platform_subtitles" : "page_or_description_text",
+        textLength,
+        reason: "Text track is already available; Whisper was skipped."
+      }
+    };
+  }
+
+  if (policy !== "true" && !forceTextTrack) {
+    return {
+      skip: true,
+      result: {
+        ok: false,
+        skipped: true,
+        textLength,
+        reason: "Whisper policy is disabled."
+      }
+    };
+  }
+
+  if (!WHISPER_BIN) {
+    return {
+      skip: true,
+      result: {
+        ok: false,
+        skipped: true,
+        textLength,
+        reason: forceTextTrack
+          ? "Text track is required, but no strong text track was found and WHISPER_BIN is not set."
+          : "WHISPER_BIN is not set. Install/configure Whisper or faster-whisper first."
+      }
+    };
+  }
+
+  return { skip: false, textLength };
+}
+
+async function transcribeAudioFile(audioPath, sessionDir, input, textTrack = {}) {
   const whisperResult = await runCommand(WHISPER_BIN, [
     audioPath,
     "--model",
-    input.whisperModel || process.env.WHISPER_MODEL || "base",
+    getWhisperModel(input),
     "--language",
     input.whisperLanguage || "zh",
     "--output_format",
     "txt",
     "--output_dir",
     sessionDir
-  ]);
+  ], {
+    timeoutMs: getWhisperTimeoutMs(input, textTrack)
+  });
   if (!whisperResult.ok) {
     return {
       ok: false,
@@ -1708,6 +1978,38 @@ async function maybeTranscribeVideo(videoPath, sessionDir, input, textTrack = {}
   };
 }
 
+function getWhisperModel(input = {}) {
+  if (input.whisperModel) return input.whisperModel;
+  if (input.textOnly) return process.env.WHISPER_TEXT_ONLY_MODEL || process.env.WHISPER_MODEL || "tiny";
+  return process.env.WHISPER_MODEL || "base";
+}
+
+function getTextTrackDurationSeconds(input = {}, textTrack = {}) {
+  const duration = Number(input.duration || textTrack.duration || input.metadata?.duration || 0);
+  return Number.isFinite(duration) && duration > 0 ? duration : 0;
+}
+
+function getAudioDownloadTimeoutMs(input, textTrack = {}) {
+  const duration = getTextTrackDurationSeconds(input, textTrack);
+  if (input.textOnly && isBilibiliUrl(input.url)) {
+    return Math.max(45000, Math.min(120000, 30000 + duration * 350));
+  }
+  return Math.max(90000, Math.min(15 * 60 * 1000, 45000 + duration * 900));
+}
+
+function getAudioExtractionTimeoutMs(input, textTrack = {}) {
+  const duration = getTextTrackDurationSeconds(input, textTrack);
+  return Math.max(60000, Math.min(10 * 60 * 1000, 30000 + duration * 500));
+}
+
+function getWhisperTimeoutMs(input, textTrack = {}) {
+  const duration = getTextTrackDurationSeconds(input, textTrack);
+  if (input.textOnly) {
+    return Math.max(90000, Math.min(180000, 60000 + duration * 450));
+  }
+  return Math.max(120000, Math.min(30 * 60 * 1000, 90000 + duration * 1800));
+}
+
 function meaningfulTextLength(text) {
   return String(text || "")
     .replace(/\s+/g, "")
@@ -1717,12 +2019,17 @@ function meaningfulTextLength(text) {
 
 function buildYtDlpAccessArgs(input) {
   const args = [];
-  if (input.cookiesFile) {
-    args.push("--cookies", String(input.cookiesFile));
+  const generatedBilibiliCookies = join(PROJECT_DIR, "user-data", "auth", "bilibili", "cookies.txt");
+  const cookiesFile =
+    input.cookiesFile ||
+    (isBilibiliUrl(input.url) && process.env.BILIBILI_COOKIES_FILE) ||
+    (isBilibiliUrl(input.url) && existsSync(generatedBilibiliCookies) ? generatedBilibiliCookies : "");
+  if (cookiesFile) {
+    args.push("--cookies", String(cookiesFile));
   }
   if (input.cookiesFromBrowser) {
     args.push("--cookies-from-browser", String(input.cookiesFromBrowser));
-  } else if (isBilibiliUrl(input.url)) {
+  } else if (isBilibiliUrl(input.url) && !input.disableAutoBrowserCookies && !cookiesFile) {
     args.push("--cookies-from-browser", "edge");
   }
   return args;
@@ -2411,6 +2718,21 @@ async function findLargestVideoFile(dir) {
   if (files.length === 0) {
     throw new Error(`No downloaded video file found in ${dir}`);
   }
+  let largest = files[0];
+  let largestSize = 0;
+  for (const file of files) {
+    const info = await stat(file);
+    if (info.size > largestSize) {
+      largest = file;
+      largestSize = info.size;
+    }
+  }
+  return largest;
+}
+
+async function findAudioFile(dir) {
+  const files = await listFiles(dir, [".wav", ".mp3", ".m4a", ".aac", ".opus", ".webm"]);
+  if (files.length === 0) return "";
   let largest = files[0];
   let largestSize = 0;
   for (const file of files) {

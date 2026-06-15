@@ -13,9 +13,12 @@ const port = Number(process.env.VIDEO_LEARNING_WEB_PORT || 8787);
 const jobs = new Map();
 const jobSecrets = new Map();
 const jobProcesses = new Map();
+const authProcesses = new Map();
 const allowedFileRoots = new Set([path.resolve(projectDir, "sessions")]);
 const logDir = path.join(projectDir, "logs");
 const logPath = path.join(logDir, "web_server.log");
+const userDataDir = path.join(projectDir, "user-data");
+const authRootDir = path.join(userDataDir, "auth");
 
 function runNodeScript(scriptName, args = [], options = {}) {
   return new Promise((resolve, reject) => {
@@ -112,6 +115,87 @@ function normalizeProviderConfig(config = {}) {
       hasApiKey: Boolean(apiKey)
     },
     env
+  };
+}
+
+function platformAuthDir(platform) {
+  return path.join(authRootDir, String(platform || "").toLowerCase());
+}
+
+function platformCookiesPath(platform) {
+  return path.join(platformAuthDir(platform), "cookies.txt");
+}
+
+function hasPlatformCookies(platform) {
+  const filePath = platformCookiesPath(platform);
+  try {
+    return fs.existsSync(filePath) && fs.statSync(filePath).isFile() && fs.statSync(filePath).size > 20;
+  } catch {
+    return false;
+  }
+}
+
+function getBilibiliCookiesFile() {
+  const configured = String(process.env.BILIBILI_COOKIES_FILE || "").trim();
+  if (configured && fs.existsSync(configured)) return path.resolve(configured);
+  const generated = platformCookiesPath("bilibili");
+  return hasPlatformCookies("bilibili") ? generated : "";
+}
+
+function startBilibiliLogin(url) {
+  const existing = authProcesses.get("bilibili");
+  if (existing && !existing.killed) {
+    return {
+      ok: true,
+      phase: "already_running",
+      message: "Bilibili login window is already open.",
+      pid: existing.pid,
+      authDir: platformAuthDir("bilibili"),
+      cookiesPath: platformCookiesPath("bilibili")
+    };
+  }
+  fs.mkdirSync(platformAuthDir("bilibili"), { recursive: true });
+  const child = spawn("node", [
+    path.join(projectDir, "scripts", "bilibili_auth_helper.cjs"),
+    "open",
+    platformAuthDir("bilibili"),
+    String(url || "https://www.bilibili.com/")
+  ], {
+    cwd: projectDir,
+    env: process.env,
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true
+  });
+  authProcesses.set("bilibili", child);
+  child.once("close", () => {
+    if (authProcesses.get("bilibili") === child) authProcesses.delete("bilibili");
+  });
+  child.unref();
+  return {
+    ok: true,
+    phase: "opening",
+    message: "Bilibili login window is opening.",
+    pid: child.pid,
+    authDir: platformAuthDir("bilibili"),
+    cookiesPath: platformCookiesPath("bilibili")
+  };
+}
+
+async function getBilibiliAuthStatus(targetUrl) {
+  fs.mkdirSync(platformAuthDir("bilibili"), { recursive: true });
+  const result = await runNodeScript("bilibili_auth_helper.cjs", [
+    "status",
+    platformAuthDir("bilibili"),
+    String(targetUrl || "https://www.bilibili.com/")
+  ], {
+    timeoutMs: Number(process.env.BILIBILI_AUTH_STATUS_TIMEOUT_MS || 60000)
+  });
+  const running = Boolean(authProcesses.get("bilibili") && !authProcesses.get("bilibili").killed);
+  return {
+    ...result,
+    running,
+    cookiesPath: platformCookiesPath("bilibili")
   };
 }
 
@@ -242,7 +326,10 @@ function serveStatic(req, res) {
     res.end("Not found");
     return;
   }
-  res.writeHead(200, { "Content-Type": mimeType(filePath) });
+  res.writeHead(200, {
+    "Content-Type": mimeType(filePath),
+    "Cache-Control": "no-store, max-age=0"
+  });
   fs.createReadStream(filePath).pipe(res);
 }
 
@@ -404,6 +491,17 @@ function cleanErrorMessage(message) {
   if (text.includes("Fresh cookies") || text.includes("needs_cookies")) {
     return "平台需要 fresh cookies。可以导出 cookies.txt，或让浏览器 fallback 成功拿到页面视频地址。";
   }
+  if (/Audio-only download failed/i.test(text)) {
+    return [
+      "字幕总结已按文本快速路径执行：没有下载完整视频，也没有抽帧。",
+      "但当前链接没有可用平台字幕，系统尝试只下载音频用于 Whisper 转写时被平台拦截。",
+      /HTTP Error 412|Precondition Failed/i.test(text)
+        ? "B 站返回 412，通常是反爬、登录态或 cookies 不可用导致。"
+        : "常见原因是登录态、cookies、地区限制或平台反爬。",
+      "可换一个带字幕的视频，或配置可用 cookies 后再让 Whisper 走音频转写。",
+      trimForError(text)
+    ].join("\n");
+  }
   if (text.length > 1200) {
     return `${text.slice(0, 1200)}\n...`;
   }
@@ -501,6 +599,11 @@ async function runJob(job) {
 
     const prepareTimeoutMs = getPrepareTimeoutMs(platform, mode, subtitleOnly);
     const platformName = String(platform.platform || "").toLowerCase();
+    const bilibiliCookiesFile = platformName === "bilibili" ? getBilibiliCookiesFile() : "";
+    if (bilibiliCookiesFile) {
+      allowedFileRoots.add(path.dirname(bilibiliCookiesFile));
+      addEvent(job, "Bilibili auth", "Using local Bilibili login-helper cookies.");
+    }
     const autoFrameArgs = mode === "quick"
       ? {
           frameIntervalSeconds: 15,
@@ -531,11 +634,14 @@ async function runJob(job) {
       enableWhisper: job.input.enableWhisper ?? "auto",
       forceTextTrack: job.input.forceTextTrack !== false,
       skipFrames: subtitleOnly,
+      textOnly: subtitleOnly,
       ...autoFrameArgs,
       generateMarkmap: Boolean(generateMarkmap),
       enableBrowserFallback: true,
       enableDouyinDownloaderFallback: true,
-      enableDouyinApiFallback: true
+      enableDouyinApiFallback: true,
+      cookiesFile: bilibiliCookiesFile || undefined,
+      disableAutoBrowserCookies: Boolean(bilibiliCookiesFile)
     };
 
     let result;
@@ -550,7 +656,7 @@ async function runJob(job) {
       const jobWorkDir = path.join(job.input.outputDir || defaultOutputDir(), "web-jobs", job.id);
       fs.mkdirSync(jobWorkDir, { recursive: true });
       args.workDir = jobWorkDir;
-      addEvent(job, "Preparing video", "下载/探测视频，抽取页面文字，执行智能抽帧");
+      addEvent(job, "Preparing video", subtitleOnly ? getTextOnlyPrepareMessage(platformName) : "下载/探测视频，抽取页面文字，执行智能抽帧");
       addEvent(job, "Prepare timeout", `Dynamic prepare timeout: ${Math.round(prepareTimeoutMs / 1000)}s`);
       stopPrepareMonitor = startPrepareMonitor(job, jobWorkDir);
       let prepareChild = null;
@@ -628,8 +734,12 @@ function isSubtitleOnlyJob(job) {
 }
 
 function getPrepareTimeoutMs(platform, mode, subtitleOnly) {
-  if (subtitleOnly) return 180000;
   const name = String(platform?.platform || "").toLowerCase();
+  if (subtitleOnly) {
+    if (name === "youtube") return Number(process.env.YOUTUBE_TEXT_ONLY_JOB_TIMEOUT_MS || 2 * 60 * 1000);
+    if (name === "bilibili") return Number(process.env.BILIBILI_TEXT_ONLY_JOB_TIMEOUT_MS || 3 * 60 * 1000);
+    return Number(process.env.TEXT_ONLY_JOB_TIMEOUT_MS || 4 * 60 * 1000);
+  }
   if (mode === "quick") {
     return name === "youtube" ? 300000 : 240000;
   }
@@ -637,6 +747,17 @@ function getPrepareTimeoutMs(platform, mode, subtitleOnly) {
   if (name === "bilibili") return 600000;
   if (name === "douyin") return 420000;
   return 480000;
+}
+
+function getTextOnlyPrepareMessage(platformName) {
+  const name = String(platformName || "").toLowerCase();
+  if (name === "bilibili") {
+    return "B 站字幕总结快路径：跳过完整视频下载，优先音频转写";
+  }
+  if (name === "youtube") {
+    return "YouTube 字幕总结快路径：优先读取平台字幕，不抽帧";
+  }
+  return "字幕总结快路径：只读取字幕/音频文本轨道，不下载完整视频";
 }
 
 function defaultOutputDir() {
@@ -669,7 +790,7 @@ async function runSubtitleExport(job, context) {
     outputPath: exported.summaryPath || exported.subtitlesMarkdownPath,
     markdownPath: exported.summaryPath || null,
     articlePath: null,
-    wordPath: null,
+    wordPath: exported.wordPath || null,
     markmapMarkdownPath: exported.markmapMarkdownPath || null,
     markmapHtmlPath: exported.markmapHtmlPath || null,
     markmapPath: exported.markmapHtmlPath || null,
@@ -1224,6 +1345,18 @@ async function handleApi(req, res) {
     const body = await readBody(req);
     const result = await probeProviderConfig(body.modelConfig || body.provider || body);
     sendJson(res, result.ok ? 200 : 400, result);
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/auth/bilibili/open") {
+    const body = await readBody(req);
+    const result = startBilibiliLogin(body.url || body.targetUrl || "");
+    sendJson(res, 202, result);
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/auth/bilibili/status") {
+    const body = await readBody(req);
+    const result = await getBilibiliAuthStatus(body.url || body.targetUrl || "");
+    sendJson(res, 200, result);
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/jobs") {

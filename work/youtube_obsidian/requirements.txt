@@ -1,0 +1,5 @@
+yt-dlp
+requests
+fastapi
+uvicorn
+pydantic

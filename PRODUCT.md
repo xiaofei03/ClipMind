@@ -1,12 +1,35 @@
-# ClipMind
+# Product
 
-ClipMind is a local-first video knowledge tool. It downloads or probes videos, builds a text-first understanding track, selects useful frames, asks a multimodal model to extract key information, and generates illustrated notes, Word documents, mind maps, and subtitle summaries.
+## Register
 
-Primary user: a Chinese-speaking learner who wants practical, reusable notes from short videos, especially videos about AI tools, coding workflows, prompts, and visual UI work.
+product
 
-Design register: long-form content and tool output. The generated note should read like a polished Chinese article, not a raw debug report.
+## Users
 
-Output priorities:
-- Evidence first: screenshots and text must support each claim.
-- Readability first: use Chinese typography, Songti-style body text, restrained line length, and clear section rhythm.
-- Automation first: repeated conversion and diagnosis steps should become scripts before becoming MCP tools.
+主要用户是会长期观看 YouTube 高质量内容，并使用 Obsidian 管理个人知识库的中文用户。典型场景包括投资研究、AI 工具学习、科技趋势跟踪与深度知识整理。用户通常在浏览视频时发现有价值内容，希望先低摩擦收藏，再在合适的时候把它加工成可复用的知识卡片。
+
+## Product Purpose
+
+ClipMind 的目标是把高价值视频从“看过就流走的信息”转成“可追踪、可搜索、可复用的知识资产”。它通过本地优先的视频采集、字幕提取、转录、结构化总结与 Obsidian 写入能力，帮助用户建立一个可持续增长的视频知识沉淀系统。成功标准不是单次摘要是否完成，而是用户能稳定地收藏、处理、追踪、沉淀并回看这些知识卡片。
+
+## Brand Personality
+
+冷静、可信、克制。
+
+语气上应当像一个懂工作流、懂知识管理、又尊重用户控制权的本地智能工具。它不是喧哗的 AI 玩具，而是一个带有高级感和编辑台气质的研究工作台。界面应当传达可控、稳健、清晰的感受，同时保留少量精致动效来体现产品的智能与流动性。
+
+## Anti-references
+
+不要做成典型白底紫色 AI SaaS 模板，不要像一页式营销站，也不要做成满屏玻璃拟态和霓虹特效的炫技工具。避免“聊天即一切”的黑盒体验，避免用户点一下之后完全不知道后台处理到了哪一步。也不要做成传统企业后台那种密密麻麻但毫无气质的管理台。
+
+## Design Principles
+
+1. 过程必须可见，任何视频处理都不应是黑盒。
+2. 收藏、处理、沉淀是同一条链路，不应被割裂成分散工具。
+3. 本地优先意味着用户始终对模型、路径和输出有控制权。
+4. 界面应服务任务流，不为装饰牺牲理解成本。
+5. 高级感来自克制的层次、精确的反馈和稳定的组件语言，而不是堆砌特效。
+
+## Accessibility & Inclusion
+
+至少满足 WCAG AA 的基本对比度与键盘可达性要求。所有状态变化都应有清晰的文本或图形反馈，不能只靠颜色表达。动效需要支持 reduced motion。任务进度、错误信息、按钮状态和表单配置都应保持明确、可读、可操作。

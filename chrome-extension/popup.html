@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>影记助手</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <header class="popup-hero">
+        <div class="popup-brand">
+          <div class="popup-brand__mark">影</div>
+          <div>
+            <strong>影记</strong>
+            <span>浏览器入口</span>
+          </div>
+        </div>
+        <p class="popup-copy">YouTube 页内的小按钮负责即时处理，这里只保留轻入口，避免重复交互。</p>
+      </header>
+
+      <section class="popup-panel">
+        <button id="open-webui" class="primary">打开影记网页端</button>
+        <button id="open-sidebar" class="secondary">唤起当前页工作台</button>
+      </section>
+
+      <section class="popup-status">
+        <div class="popup-status__head">
+          <strong>最近状态</strong>
+          <span id="status-pill">等待操作</span>
+        </div>
+        <div class="popup-status__body">
+          <strong id="recent-title">暂无任务</strong>
+          <p id="recent-copy">进入 YouTube 视频页后，点击页面中的“影记”按钮即可开始。</p>
+        </div>
+      </section>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+  </html>

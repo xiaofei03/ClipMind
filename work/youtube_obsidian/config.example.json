@@ -1,0 +1,35 @@
+{
+  "obsidian_output_dir": "/ABSOLUTE/PATH/TO/YOUR/OBSIDIAN/VAULT",
+  "default_tags": [
+    "youtube",
+    "inbox"
+  ],
+  "topic_folders": {
+    "投资": "投资",
+    "AI": "AI",
+    "商业": "商业",
+    "科技": "科技",
+    "其他": "Inbox"
+  },
+  "ollama": {
+    "model": "qwen3:14b",
+    "base_url": "http://127.0.0.1:11434"
+  },
+  "model": {
+    "provider": "ollama",
+    "model": "qwen3:14b",
+    "base_url": "http://127.0.0.1:11434",
+    "api_key": "",
+    "temperature": 0.3,
+    "timeout": 180
+  },
+  "transcription": {
+    "language": "zh",
+    "whisper_model": "base"
+  },
+  "youtube": {
+    "cookies_from_browser": "chrome:Default",
+    "cookies_file": "",
+    "keep_audio_cache": false
+  }
+}

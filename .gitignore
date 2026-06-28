@@ -1,52 +1,43 @@
-# Dependencies
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+work/.venv/
+.tmp-logo-venv/
+
+# Node
 node_modules/
+webui/node_modules/
+.npm-cache/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# Environment and secrets
-.env
-.env.*
-!.env.example
-*.local
-cookies.txt
-*.cookies
-
-# Runtime data
-sessions/
-outputs/
-logs/
-tmp/
-downloads/
-temp/
-user-data/
-
-# Build output
-web/
+# Build outputs
 dist/
 build/
+webui/dist/
 
-# Python cache
-__pycache__/
-*.py[cod]
+# Local app/runtime data
+work/youtube_obsidian/jobs.db
+work/youtube_obsidian/config.json
+work/youtube_obsidian/.cache/
+outputs/
+trash_pending_delete/
 
-# OS and editor files
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-
-# Media and generated documents
-*.mp4
-*.m4v
-*.mov
-*.mkv
-*.webm
-*.mp3
-*.wav
-*.m4a
-*.srt
-*.vtt
-*.docx
-*.pdf
-
-# Playwright / browser artifacts
-playwright-report/
-test-results/
+# Local IDE/runtime noise
+*.log
+*.sqlite
+*.sqlite3
